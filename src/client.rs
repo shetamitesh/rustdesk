@@ -33,7 +33,7 @@ use crate::{
     create_symmetric_key_msg, decode_id_pk, get_rs_pk, is_keyboard_mode_supported,
     kcp_stream::KcpStream,
     secure_tcp,
-    ui_interface::{get_builtin_option, use_texture_render},
+    ui_interface::{get_builtin_option, resolve_avatar_url, use_texture_render},
     ui_session_interface::{InvokeUiSession, Session},
 };
 #[cfg(feature = "unix-file-copy-paste")]
@@ -119,10 +119,13 @@ pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
 pub const LOGIN_MSG_OFFLINE: &str = "Offline";
 pub const LOGIN_SCREEN_WAYLAND: &str = "Wayland login screen is not supported";
 #[cfg(target_os = "linux")]
-pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "Wayland requires Ubuntu 21.04 or higher version.";
+pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "ubuntu-21-04-required";
 #[cfg(target_os = "linux")]
 pub const SCRAP_OTHER_VERSION_OR_X11_REQUIRED: &str =
-    "Wayland requires higher version of linux distro. Please try X11 desktop or change your OS.";
+    "wayland-requires-higher-linux-version";
+#[cfg(target_os = "linux")]
+pub const SCRAP_XDP_PORTAL_UNAVAILABLE: &str =
+    "xdp-portal-unavailable";
 pub const SCRAP_X11_REQUIRED: &str = "x11 expected";
 pub const SCRAP_X11_REF_URL: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";
 
@@ -1742,6 +1745,9 @@ pub struct LoginConfigHandler {
     pub direct: Option<bool>,
     pub received: bool,
     switch_uuid: Option<String>,
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    switch_back_allowed: bool,
     pub save_ab_password_to_recent: bool, // true: connected with ab password
     pub other_server: Option<(String, String, String)>,
     pub custom_fps: Arc<Mutex<Option<usize>>>,
@@ -1858,6 +1864,11 @@ impl LoginConfigHandler {
 
         self.direct = None;
         self.received = false;
+        #[cfg(feature = "flutter")]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            self.switch_back_allowed = false;
+        }
         self.switch_uuid = switch_uuid;
         self.adapter_luid = adapter_luid;
         self.selected_windows_session_id = None;
@@ -1869,6 +1880,23 @@ impl LoginConfigHandler {
         let is_terminal_admin = conn_type == ConnType::TERMINAL
             && std::env::var("IS_TERMINAL_ADMIN").map_or(false, |v| v == "Y");
         self.is_terminal_admin = is_terminal_admin;
+    }
+
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn allow_switch_back_once(&mut self) {
+        self.switch_back_allowed = true;
+    }
+
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn consume_switch_back_permission(&mut self) -> bool {
+        if self.switch_back_allowed {
+            self.switch_back_allowed = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if the client should auto login.
@@ -2625,15 +2653,32 @@ impl LoginConfigHandler {
         } else {
             (my_id, self.id.clone())
         };
+        let mut avatar = get_builtin_option(keys::OPTION_AVATAR);
+        if avatar.is_empty() {
+            avatar = serde_json::from_str::<serde_json::Value>(&LocalConfig::get_option(
+                "user_info",
+            ))
+            .ok()
+            .and_then(|x| {
+                x.get("avatar")
+                    .and_then(|x| x.as_str())
+                    .map(|x| x.trim().to_owned())
+            })
+            .unwrap_or_default();
+        }
+        avatar = resolve_avatar_url(avatar);
         let mut display_name = get_builtin_option(keys::OPTION_DISPLAY_NAME);
         if display_name.is_empty() {
             display_name =
                 serde_json::from_str::<serde_json::Value>(&LocalConfig::get_option("user_info"))
                     .map(|x| {
-                        x.get("name")
-                            .map(|x| x.as_str().unwrap_or_default())
+                        x.get("display_name")
+                            .and_then(|x| x.as_str())
+                            .map(|x| x.trim())
+                            .filter(|x| !x.is_empty())
+                            .or_else(|| x.get("name").and_then(|x| x.as_str()))
+                            .map(|x| x.to_owned())
                             .unwrap_or_default()
-                            .to_owned()
                     })
                     .unwrap_or_default();
         }
@@ -2681,6 +2726,7 @@ impl LoginConfigHandler {
             })
             .into(),
             hwid,
+            avatar,
             ..Default::default()
         };
         match self.conn_type {
@@ -3356,6 +3402,36 @@ pub fn handle_login_error(
     }
 }
 
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn consume_local_switch_sides_uuid(id: &str, uuid: &Uuid) -> bool {
+    let Ok(mut conn) = crate::ipc::connect(1000, "").await else {
+        return false;
+    };
+    let uuid = uuid.to_string();
+    if conn
+        .send(&crate::ipc::Data::SwitchSidesUuid(
+            uuid.clone(),
+            id.to_owned(),
+            None,
+        ))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    match conn.next_timeout(1000).await {
+        Ok(Some(crate::ipc::Data::SwitchSidesUuid(
+            returned_uuid,
+            returned_id,
+            Some(true),
+        ))) => {
+            returned_uuid == uuid && returned_id == id
+        }
+        _ => false,
+    }
+}
+
 /// Handle hash message sent by peer.
 /// Hash will be used for login.
 ///
@@ -3376,12 +3452,22 @@ pub async fn handle_hash(
     // Take care of password application order
 
     // switch_uuid
-    let uuid = lc.write().unwrap().switch_uuid.take();
-    if let Some(uuid) = uuid {
-        if let Ok(uuid) = uuid::Uuid::from_str(&uuid) {
-            send_switch_login_request(lc.clone(), peer, uuid).await;
-            lc.write().unwrap().password_source = Default::default();
-            return;
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let uuid = lc.write().unwrap().switch_uuid.take();
+        if let Some(uuid) = uuid {
+            if let Ok(uuid) = uuid::Uuid::from_str(&uuid) {
+                let id = lc.read().unwrap().id.clone();
+                if !consume_local_switch_sides_uuid(&id, &uuid).await {
+                    log::warn!("Ignored untrusted switch_uuid");
+                } else {
+                    lc.write().unwrap().allow_switch_back_once();
+                    send_switch_login_request(lc.clone(), peer, uuid).await;
+                    lc.write().unwrap().password_source = Default::default();
+                    return;
+                }
+            }
         }
     }
     // last password
@@ -3849,6 +3935,7 @@ pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: b
                 && !text.to_lowercase().contains("resolve")
                 && !text.to_lowercase().contains("mismatch")
                 && !text.to_lowercase().contains("manually")
+                && !text.to_lowercase().contains("restricted")
                 && !text.to_lowercase().contains("not allowed")))
 }
 

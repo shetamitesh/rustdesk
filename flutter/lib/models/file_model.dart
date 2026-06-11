@@ -113,6 +113,34 @@ class FileModel {
     fileFetcher.tryCompleteEmptyDirsTask(evt['value'], evt['is_local']);
   }
 
+  // This method fixes a deadlock that occurred when the previous code directly
+  // called jobController.jobError(evt) in the job_error event handler.
+  //
+  // The problem with directly calling jobController.jobError():
+  //   1. fetchDirectoryRecursiveToRemove(jobID) registers readRecursiveTasks[jobID]
+  //      and waits for completion
+  //   2. If the remote has no permission (or some other errors), it returns a FileTransferError
+  //   3. The error triggers job_error event, which called jobController.jobError()
+  //   4. jobController.jobError() calls getJob(jobID) to find the job in jobTable
+  //   5. But addDeleteDirJob() is called AFTER fetchDirectoryRecursiveToRemove(),
+  //      so the job doesn't exist yet in jobTable
+  //   6. Result: jobController.jobError() does nothing useful, and
+  //      readRecursiveTasks[jobID] never completes, causing a 2s timeout
+  //
+  // Solution: Before calling jobController.jobError(), we first check if there's
+  // a pending readRecursiveTasks with this ID and complete it with the error.
+  void handleJobError(Map<String, dynamic> evt) {
+    final id = int.tryParse(evt['id']?.toString() ?? '');
+    if (id != null) {
+      final err = evt['err']?.toString() ?? 'Unknown error';
+      fileFetcher.tryCompleteRecursiveTaskWithError(id, err);
+    }
+    // Always call jobController.jobError(evt) to ensure all error events are processed,
+    // even if the event does not have a valid job ID. This allows for generic error handling
+    // or logging of unexpected errors.
+    jobController.jobError(evt);
+  }
+
   Future<void> postOverrideFileConfirm(Map<String, dynamic> evt) async {
     evtLoop.pushEvent(
         _FileDialogEvent(WeakReference(this), FileDialogType.overwrite, evt));
@@ -363,14 +391,30 @@ class FileController {
 
     await Future.delayed(Duration(milliseconds: 100));
 
-    final dir = (await bind.sessionGetPeerOption(
+    final savedDir = (await bind.sessionGetPeerOption(
         sessionId: sessionId, name: isLocal ? "local_dir" : "remote_dir"));
-    openDirectory(dir.isEmpty ? options.value.home : dir);
+    Future<bool> tryOpenReadyDirs() async {
+      final dirs = <String>{
+        if (directory.value.path.isNotEmpty) directory.value.path,
+        if (savedDir.isNotEmpty) savedDir,
+        options.value.home,
+      };
+      for (final dir in dirs) {
+        if (await _openDirectoryPath(dir, isBack: true)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    var opened = await tryOpenReadyDirs();
 
     await Future.delayed(Duration(seconds: 1));
 
-    if (directory.value.path.isEmpty) {
-      openDirectory(options.value.home);
+    if (!opened) {
+      // The peer may become ready during the reconnect delay, so retry the
+      // same candidates instead of only retrying the default home directory.
+      await tryOpenReadyDirs();
     }
   }
 
@@ -401,19 +445,23 @@ class FileController {
     });
   }
 
-  Future<void> refresh() async {
-    await openDirectory(directory.value.path);
+  Future<bool> refresh() async {
+    // "." can be both a refresh command and a real remote directory path.
+    // Refresh must bypass openDirectory's command dispatch to avoid recursion.
+    return await _openDirectoryPath(directory.value.path, isBack: true);
   }
 
-  Future<void> openDirectory(String path, {bool isBack = false}) async {
-    if (path == ".") {
-      refresh();
-      return;
+  Future<bool> openDirectory(String path, {bool isBack = false}) async {
+    if (!isBack && path == ".") {
+      return await refresh();
     }
-    if (path == "..") {
-      goToParentDirectory();
-      return;
+    if (!isBack && path == "..") {
+      return await _goToParentDirectory(isBack: isBack);
     }
+    return await _openDirectoryPath(path, isBack: isBack);
+  }
+
+  Future<bool> _openDirectoryPath(String path, {bool isBack = false}) async {
     if (!isBack) {
       pushHistory();
     }
@@ -430,8 +478,10 @@ class FileController {
       final fd = await fileFetcher.fetchDirectory(path, isLocal, showHidden);
       fd.format(isWindows, sort: sortBy.value);
       directory.value = fd;
+      return true;
     } catch (e) {
       debugPrint("Failed to openDirectory $path: $e");
+      return false;
     }
   }
 
@@ -459,19 +509,22 @@ class FileController {
       goBack();
       return;
     }
-    openDirectory(path, isBack: true);
+    unawaited(_openDirectoryPath(path, isBack: true).then<void>((_) {}));
   }
 
   void goToParentDirectory() {
+    unawaited(_goToParentDirectory().then<void>((_) {}));
+  }
+
+  Future<bool> _goToParentDirectory({bool isBack = false}) async {
     final isWindows = options.value.isWindows;
     final dirPath = directory.value.path;
     var parent = PathUtil.dirname(dirPath, isWindows);
     // specially for C:\, D:\, goto '/'
     if (parent == dirPath && isWindows) {
-      openDirectory('/');
-      return;
+      return await _openDirectoryPath('/', isBack: isBack);
     }
-    openDirectory(parent);
+    return await _openDirectoryPath(parent, isBack: isBack);
   }
 
   // TODO deprecated this
@@ -591,8 +644,21 @@ class FileController {
       } else if (item.isDirectory) {
         title = translate("Not an empty directory");
         dialogManager?.showLoading(translate("Waiting"));
-        final fd = await fileFetcher.fetchDirectoryRecursiveToRemove(
-            jobID, item.path, items.isLocal, true);
+        final FileDirectory fd;
+        try {
+          fd = await fileFetcher.fetchDirectoryRecursiveToRemove(
+              jobID, item.path, items.isLocal, true);
+        } catch (e) {
+          dialogManager?.dismissAll();
+          final dm = dialogManager;
+          if (dm != null) {
+            msgBox(sessionId, 'custom-error-nook-nocancel-hasclose',
+                translate("Error"), e.toString(), '', dm);
+          } else {
+            debugPrint("removeAction error msgbox failed: $e");
+          }
+          return;
+        }
         if (fd.path.isEmpty) {
           fd.path = item.path;
         }
@@ -606,7 +672,7 @@ class FileController {
               item.name,
               false);
           if (confirm == true) {
-            sendRemoveEmptyDir(
+            await sendRemoveEmptyDir(
               item.path,
               0,
               deleteJobId,
@@ -647,7 +713,7 @@ class FileController {
             // handle remove res;
             if (item.isDirectory &&
                 res['file_num'] == (entries.length - 1).toString()) {
-              sendRemoveEmptyDir(item.path, i, deleteJobId);
+              await sendRemoveEmptyDir(item.path, i, deleteJobId);
             }
           } else {
             jobController.updateJobStatus(deleteJobId,
@@ -660,7 +726,7 @@ class FileController {
                 final res = await jobController.jobResultListener.start();
                 if (item.isDirectory &&
                     res['file_num'] == (entries.length - 1).toString()) {
-                  sendRemoveEmptyDir(item.path, i, deleteJobId);
+                  await sendRemoveEmptyDir(item.path, i, deleteJobId);
                 }
               }
             } else {
@@ -755,9 +821,9 @@ class FileController {
         fileNum: fileNum);
   }
 
-  void sendRemoveEmptyDir(String path, int fileNum, int actId) {
+  Future<void> sendRemoveEmptyDir(String path, int fileNum, int actId) async {
     history.removeWhere((element) => element.contains(path));
-    bind.sessionRemoveAllEmptyDirs(
+    await bind.sessionRemoveAllEmptyDirs(
         sessionId: sessionId, actId: actId, path: path, isRemote: !isLocal);
   }
 
@@ -1275,6 +1341,15 @@ class FileFetcher {
     }
   }
 
+  // Complete a pending recursive read task with an error.
+  // See FileModel.handleJobError() for why this is necessary.
+  void tryCompleteRecursiveTaskWithError(int id, String error) {
+    final completer = readRecursiveTasks.remove(id);
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(error);
+    }
+  }
+
   Future<List<FileDirectory>> readEmptyDirs(
       String path, bool isLocal, bool showHidden) async {
     try {
@@ -1437,6 +1512,10 @@ class JobProgress {
   var showHidden = false;
   var err = "";
   int lastTransferredSize = 0;
+
+  double get percent =>
+      totalSize > 0 ? (finishedSize.toDouble() / totalSize) : 0.0;
+  String get percentText => '${(percent * 100).toStringAsFixed(0)}%';
 
   clear() {
     type = JobType.none;
