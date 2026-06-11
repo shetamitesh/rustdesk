@@ -949,19 +949,34 @@ pub fn check_software_update() {
     }
 }
 
-// No need to check `danger_accept_invalid_cert` for now.
-// Because the url is always `https://api.rustdesk.com/version/latest`.
+// GitHub repository ("owner/name") whose releases are used for update checks.
+// Update checks query this fork's releases and download the published assets
+// (e.g. `rustdesk-<tag>-x86_64.exe`/`.msi`/`.dmg`). The release tag MUST match
+// the version in the asset file names (which is the Cargo.toml version).
+const UPDATE_GITHUB_REPO: &str = "shetamitesh/rustdesk";
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
-    let (request, url) =
-        hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+    // List releases (includes pre-releases) so the newest published release is found,
+    // regardless of whether it is marked as a pre-release.
+    let url = format!(
+        "https://api.github.com/repos/{}/releases?per_page=10",
+        UPDATE_GITHUB_REPO
+    );
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
     let is_tls_not_cached = tls_type.is_none();
     let tls_type = tls_type.unwrap_or(TlsType::Rustls);
     let client = create_http_client_async(tls_type, false);
-    let latest_release_response = match client.post(&url).json(&request).send().await {
+    // GitHub's API rejects requests without a User-Agent header.
+    let build_req = |client: &reqwest::Client| {
+        client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, "rustdesk")
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+    };
+    let latest_release_response = match build_req(&client).send().await {
         Ok(resp) => {
             upsert_tls_cache(tls_url, tls_type, false);
             resp
@@ -970,7 +985,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
             if is_tls_not_cached && err.is_request() {
                 let tls_type = TlsType::NativeTls;
                 let client = create_http_client_async(tls_type, false);
-                let resp = client.post(&url).json(&request).send().await?;
+                let resp = build_req(&client).send().await?;
                 upsert_tls_cache(tls_url, tls_type, false);
                 resp
             } else {
@@ -979,11 +994,25 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         }
     };
     let bytes = latest_release_response.bytes().await?;
-    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
-    let response_url = resp.url;
+    let releases: serde_json::Value = serde_json::from_slice(&bytes)?;
+    // Pick the most recent non-draft release and use its tag page URL, e.g.
+    // `https://github.com/<owner>/<repo>/releases/tag/<tag>`. The rest of the
+    // updater derives the download URL/version from this URL, unchanged.
+    let response_url = releases
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|r| !r.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
+        })
+        .and_then(|r| r.get("html_url"))
+        .and_then(|u| u.as_str())
+        .unwrap_or_default()
+        .to_string();
     let latest_release_version = response_url.rsplit('/').next().unwrap_or_default();
 
-    if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {
+    if !response_url.is_empty()
+        && get_version_number(&latest_release_version) > get_version_number(crate::VERSION)
+    {
         #[cfg(feature = "flutter")]
         {
             let mut m = HashMap::new();
@@ -2272,6 +2301,11 @@ pub fn get_hwid() -> Bytes {
 
 #[inline]
 pub fn get_builtin_option(key: &str) -> String {
+    // Custom build: always hide the ID/Relay server setting under Network so
+    // end users cannot change the ID/Relay server baked into this build.
+    if key == keys::OPTION_HIDE_SERVER_SETTINGS {
+        return "Y".to_string();
+    }
     config::BUILTIN_SETTINGS
         .read()
         .unwrap()
