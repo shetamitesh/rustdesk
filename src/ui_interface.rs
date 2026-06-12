@@ -562,13 +562,13 @@ pub fn set_share_rdp(_enable: bool) {
 
 #[inline]
 pub fn is_installed_lower_version() -> bool {
-    #[cfg(not(windows))]
-    return false;
-    #[cfg(windows)]
-    {
-        let b = crate::platform::windows::get_reg("BuildDate");
-        return crate::BUILD_DATE.cmp(&b).is_gt();
-    }
+    // Custom build: never show the "Your installation is lower version /
+    // Click to upgrade" card. The original check is based purely on build date
+    // (the running binary's BUILD_DATE vs the BuildDate written to the registry
+    // at install time), so it appears even when there is no actual newer version
+    // available. Real updates are surfaced separately by the software-update
+    // check (the "Update available" card), which is unaffected by this.
+    false
 }
 
 #[inline]
