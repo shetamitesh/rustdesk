@@ -562,22 +562,13 @@ pub fn set_share_rdp(_enable: bool) {
 
 #[inline]
 pub fn is_installed_lower_version() -> bool {
-    #[cfg(not(windows))]
-    return false;
-    #[cfg(windows)]
-    {
-        // Compare actual version numbers, not build dates. The original check
-        // used the registry BuildDate vs this binary's BUILD_DATE, which fired
-        // even when the installed version was the same or newer (just built on
-        // an earlier date). Now we only report the installation as lower when
-        // the installed version is genuinely older than this running build.
-        let installed = crate::platform::windows::get_reg("Version");
-        if installed.is_empty() {
-            return false;
-        }
-        hbb_common::get_version_number(crate::VERSION)
-            > hbb_common::get_version_number(&installed)
-    }
+    // Custom build: the upgrade prompt is driven only by the GitHub release
+    // check (running version vs this fork's latest release), shown as the
+    // "Update available" card. We deliberately do NOT compare against the
+    // locally installed version, so this always returns false: running the
+    // latest downloaded build shows no card, while running an older version is
+    // prompted to update by the GitHub-based check instead.
+    false
 }
 
 #[inline]
