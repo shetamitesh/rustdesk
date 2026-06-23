@@ -78,6 +78,7 @@ pub struct Remote<T: InvokeUiSession> {
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
     sent_close_reason: bool,
+    audit_key: String,
 }
 
 #[derive(Default)]
@@ -127,6 +128,7 @@ impl<T: InvokeUiSession> Remote<T> {
             chroma: Default::default(),
             last_record_state: false,
             sent_close_reason: false,
+            audit_key: String::new(),
         }
     }
 
@@ -164,6 +166,8 @@ impl<T: InvokeUiSession> Remote<T> {
         } else {
             ConnType::default()
         };
+
+        self.audit_key = format!("out-{}", uuid::Uuid::new_v4());
 
         match Client::start(
             &self.handler.get_id(),
@@ -319,6 +323,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
                 log::debug!("Exit io_loop of id={}", self.handler.get_id());
+                crate::conn_log::log_end(&self.audit_key, "closed");
                 // Stop client audio server.
                 if let Some(s) = self.stop_voice_call_sender.take() {
                     s.send(()).ok();
@@ -1328,6 +1333,30 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.handler.lc.write().unwrap().enable_trusted_devices =
                                 lr.enable_trusted_devices;
                         }
+                        // Log real auth failures/denials, skipping handshake prompts.
+                        if err != client::REQUIRE_2FA
+                            && err != client::LOGIN_MSG_PASSWORD_EMPTY
+                            && !err.starts_with("Desktop")
+                        {
+                            crate::conn_log::log_auth_failed(
+                                crate::conn_log::DIR_OUTGOING,
+                                if self.handler.is_file_transfer() {
+                                    "file-transfer"
+                                } else if self.handler.is_view_camera() {
+                                    "view-camera"
+                                } else if self.handler.is_terminal() {
+                                    "terminal"
+                                } else {
+                                    "remote"
+                                },
+                                &err,
+                                &self.handler.get_id(),
+                                "",
+                                "",
+                                "",
+                                "",
+                            );
+                        }
                         if !self.handler.handle_login_error(&err) {
                             return false;
                         }
@@ -1335,6 +1364,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(login_response::Union::PeerInfo(pi)) => {
                         let peer_version = pi.version.clone();
                         let peer_platform = pi.platform.clone();
+                        let peer_hostname = pi.hostname.clone();
                         self.set_peer_info(&pi);
                         if self.handler.is_view_camera() {
                             if !self.check_view_camera_support(&peer_version, &peer_platform) {
@@ -1412,6 +1442,24 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.handler.load_last_jobs();
                         }
 
+                        crate::conn_log::log_start(
+                            self.audit_key.clone(),
+                            crate::conn_log::DIR_OUTGOING,
+                            if self.handler.is_file_transfer() {
+                                "file-transfer"
+                            } else if self.handler.is_view_camera() {
+                                "view-camera"
+                            } else if self.handler.is_terminal() {
+                                "terminal"
+                            } else {
+                                "remote"
+                            },
+                            &self.handler.get_id(),
+                            &peer_hostname,
+                            &peer_platform,
+                            "",
+                            &peer_version,
+                        );
                         self.is_connected = true;
                     }
                     _ => {}

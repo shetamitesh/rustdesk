@@ -1568,6 +1568,22 @@ impl Connection {
         self.post_conn_audit(
             json!({"peer": ((&self.lr.my_id, &self.lr.my_name)), "type": conn_type}),
         );
+        crate::conn_log::log_start(
+            format!("in-{}", self.inner.id()),
+            crate::conn_log::DIR_INCOMING,
+            match conn_type {
+                1 => "file-transfer",
+                2 => "port-forward",
+                3 => "view-camera",
+                4 => "terminal",
+                _ => "remote",
+            },
+            &self.lr.my_id,
+            &self.lr.my_name,
+            &self.lr.my_platform,
+            &self.ip,
+            &self.lr.version,
+        );
         #[allow(unused_mut)]
         let mut username = crate::platform::get_active_username();
         let mut res = LoginResponse::new();
@@ -2008,6 +2024,24 @@ impl Connection {
     }
 
     async fn send_login_error<T: std::string::ToString>(&mut self, err: T) {
+        let err_str = err.to_string();
+        // Skip handshake prompts and transient desktop states; only log real
+        // authentication failures / access denials.
+        let is_prompt = err_str == crate::client::LOGIN_MSG_PASSWORD_EMPTY
+            || err_str == crate::client::REQUIRE_2FA
+            || err_str.starts_with("Desktop");
+        if !is_prompt {
+            crate::conn_log::log_auth_failed(
+                crate::conn_log::DIR_INCOMING,
+                "unknown",
+                &err_str,
+                &self.lr.my_id,
+                &self.lr.my_name,
+                &self.lr.my_platform,
+                &self.ip,
+                &self.lr.version,
+            );
+        }
         let mut msg_out = Message::new();
         let mut res = LoginResponse::new();
         res.set_error(err.to_string());
@@ -4622,6 +4656,10 @@ impl Connection {
             return;
         }
         self.closed = true;
+        crate::conn_log::log_end(
+            &format!("in-{}", self.inner.id()),
+            if reason.is_empty() { "closed" } else { reason },
+        );
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
