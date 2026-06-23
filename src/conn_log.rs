@@ -17,8 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-// RemoteGuard connection-log ingest endpoint (plain HTTP, LAN).
-const API_URL: &str = "http://192.168.2.208:9119/api/connection-logs";
+// RemoteGuard connection-log ingest endpoint.
+const API_URL: &str = "https://rd.puregroup.info/api/connection-logs";
+// Host:port used only to discover the local source IP (no packet is sent).
+const API_HOST_PORT: &str = "rd.puregroup.info:443";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub const DIR_INCOMING: &str = "incoming";
@@ -98,7 +100,7 @@ fn local_ip() -> String {
     use std::net::UdpSocket;
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
-            s.connect("192.168.2.208:9119")?;
+            s.connect(API_HOST_PORT)?;
             s.local_addr()
         })
         .map(|a| a.ip().to_string())
