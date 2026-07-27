@@ -1073,6 +1073,20 @@ pub fn set_license_data(value: &str) -> ResultType<()> {
     run_cmds(cmd, false, "LicenseData")
 }
 
+// Silent variant for the background re-check: writes directly only when already
+// elevated / SYSTEM, and never prompts. Errors (without prompting) otherwise.
+pub fn set_license_data_silent(value: &str) -> ResultType<()> {
+    if !(is_root() || is_elevated(None).unwrap_or(false)) {
+        bail!("not elevated; skipping silent license write");
+    }
+    let (subkey, _, _, _) = get_install_info();
+    let path = subkey.replace("HKEY_LOCAL_MACHINE\\", "");
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let (key, _) = hklm.create_subkey_with_flags(&path, KEY_READ | KEY_WRITE)?;
+    key.set_value("LicenseData", &value.to_string())?;
+    Ok(())
+}
+
 pub fn get_current_process_session_id() -> Option<u32> {
     get_session_id_of_process(unsafe { GetCurrentProcessId() })
 }

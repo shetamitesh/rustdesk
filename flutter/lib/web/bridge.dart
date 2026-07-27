@@ -1793,6 +1793,19 @@ class RustdeskImpl {
     throw UnimplementedError("mainSetUnlockPin");
   }
 
+  // Activation is desktop-only; web is never gated.
+  bool mainIsActivated({dynamic hint}) {
+    return true;
+  }
+
+  String mainGetMachineFingerprint({dynamic hint}) {
+    return '';
+  }
+
+  Future<String> mainActivate({required String key, dynamic hint}) {
+    return Future.value('');
+  }
+
   bool sessionGetEnableTrustedDevices(
       {required UuidValue sessionId, dynamic hint}) {
     return js.context.callMethod('getByName', ['enable_trusted_devices']) ==

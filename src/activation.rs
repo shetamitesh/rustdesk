@@ -142,9 +142,17 @@ fn write_stored(value: &str) -> Result<(), String> {
     crate::platform::windows::set_license_data(value).map_err(|e| e.to_string())
 }
 
+// Background re-check writes: never prompt for UAC. If not elevated, this fails
+// and the token is simply left to expire naturally (which still enforces the
+// grace window and revocation).
+#[cfg(windows)]
+fn write_stored_silent(value: &str) -> Result<(), String> {
+    crate::platform::windows::set_license_data_silent(value).map_err(|e| e.to_string())
+}
+
 #[cfg(windows)]
 fn clear_stored() {
-    let _ = crate::platform::windows::set_license_data("");
+    let _ = crate::platform::windows::set_license_data_silent("");
 }
 
 #[cfg(not(windows))]
@@ -160,6 +168,12 @@ fn read_stored() -> String {
 #[cfg(not(windows))]
 fn write_stored(value: &str) -> Result<(), String> {
     std::fs::write(license_file(), value).map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn write_stored_silent(value: &str) -> Result<(), String> {
+    // No elevation concept off Windows.
+    write_stored(value)
 }
 
 #[cfg(not(windows))]
@@ -225,12 +239,17 @@ fn post_json(url: &'static str, body: serde_json::Value) -> Result<ApiResp, Stri
     .map_err(|_| "activation request thread panicked".to_string())?
 }
 
-fn store_verified_token(token: &str) -> Result<(), String> {
+fn store_verified_token(token: &str, silent: bool) -> Result<(), String> {
     let claims = verify_token(token).ok_or_else(|| "Invalid token from server".to_string())?;
     if claims.f != machine_fingerprint() {
         return Err("Token is bound to a different machine".to_string());
     }
-    write_stored(&encrypt_blob(token.as_bytes()))
+    let blob = encrypt_blob(token.as_bytes());
+    if silent {
+        write_stored_silent(&blob)
+    } else {
+        write_stored(&blob)
+    }
 }
 
 /// Activate this machine with `key`. Returns Ok(()) on success, or a user-facing
@@ -252,7 +271,7 @@ pub fn activate(key: &str) -> Result<(), String> {
     let token = resp
         .token
         .ok_or_else(|| "Server did not return a token".to_string())?;
-    store_verified_token(&token)?;
+    store_verified_token(&token, false)?;
     log::info!("App activated successfully");
     Ok(())
 }
@@ -271,7 +290,7 @@ pub fn recheck() {
     match post_json(VALIDATE_URL, body) {
         Ok(resp) if resp.success => {
             if let Some(token) = resp.token {
-                if let Err(e) = store_verified_token(&token) {
+                if let Err(e) = store_verified_token(&token, true) {
                     log::debug!("license recheck: failed to store refreshed token: {}", e);
                 }
             }
@@ -290,4 +309,22 @@ pub fn recheck() {
             log::debug!("license recheck: network error (ignored): {}", e);
         }
     }
+}
+
+/// Start the daily background license re-check. Idempotent: only the first call
+/// spawns the loop.
+pub fn start_recheck() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(|| {
+        // Small initial delay so startup isn't slowed.
+        std::thread::sleep(Duration::from_secs(60));
+        loop {
+            recheck();
+            std::thread::sleep(Duration::from_secs(24 * 60 * 60));
+        }
+    });
 }

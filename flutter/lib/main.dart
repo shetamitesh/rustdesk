@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
+import 'package:flutter_hbb/desktop/pages/activation_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_view_camera_screen.dart';
@@ -136,10 +137,14 @@ Future<void> initEnv(String appType) async {
 void runMainApp(bool startService) async {
   // register uni links
   await initEnv(kAppTypeMain);
+  // Activation gate (desktop): if this machine is not activated, show only the
+  // activation screen and do NOT start the service (it also refuses incoming).
+  final activated = !isDesktop || bind.mainIsActivated();
+  rxActivated.value = activated;
   checkUpdate();
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
-  if (startService) {
+  if (startService && activated) {
     gFFI.serverModel.startService();
     bind.pluginSyncUi(syncTo: kAppTypeMain);
     bind.pluginListReload();
@@ -507,7 +512,9 @@ class _AppState extends State<App> with WidgetsBindingObserver {
           darkTheme: MyTheme.darkTheme,
           themeMode: MyTheme.currentThemeMode(),
           home: isDesktop
-              ? const DesktopTabPage()
+              ? Obx(() => rxActivated.value
+                  ? const DesktopTabPage()
+                  : const ActivationPage())
               : isWeb
                   ? WebHomePage()
                   : HomePage(),

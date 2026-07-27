@@ -1503,6 +1503,15 @@ impl Connection {
         if self.authorized {
             return true;
         }
+        // App activation gate: refuse all incoming connections when this device is
+        // not activated. Desktop only (activation is not enforced on mobile hosts).
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            if !crate::activation::is_activated() {
+                self.send_login_error("This device is not activated").await;
+                return false;
+            }
+        }
         if self.require_2fa.is_some() && !self.is_recent_session(true) && !self.from_switch {
             self.require_2fa.as_ref().map(|totp| {
                 let bot = crate::auth_2fa::TelegramBot::get();

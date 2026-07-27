@@ -589,6 +589,10 @@ pub async fn start_server(is_server: bool, no_server: bool) {
 
     if is_server {
         crate::common::set_server_running(true);
+        // Daily background license re-check (desktop only). Enforces revocation and
+        // refreshes the offline grace window.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::activation::start_recheck();
         std::thread::spawn(move || {
             if let Err(err) = crate::ipc::start("") {
                 log::error!("Failed to start ipc: {}", err);
