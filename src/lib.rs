@@ -21,6 +21,8 @@ pub use self::rendezvous_mediator::*;
 pub mod common;
 /// cbindgen:ignore
 pub mod conn_log;
+/// cbindgen:ignore
+pub mod activation;
 #[cfg(not(any(target_os = "ios")))]
 pub mod ipc;
 #[cfg(not(any(

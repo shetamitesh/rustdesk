@@ -2155,6 +2155,25 @@ pub fn main_set_unlock_pin(pin: String) -> SyncReturn<String> {
     SyncReturn(set_unlock_pin(pin))
 }
 
+// App activation. `main_activate` returns an empty string on success, or a
+// user-facing error message on failure.
+pub fn main_is_activated() -> SyncReturn<bool> {
+    SyncReturn(crate::activation::is_activated())
+}
+
+pub fn main_get_machine_fingerprint() -> SyncReturn<String> {
+    SyncReturn(crate::activation::machine_fingerprint())
+}
+
+// Async (no SyncReturn): performs a network call, so flutter_rust_bridge runs it
+// on a worker thread and Dart awaits it — the UI stays responsive.
+pub fn main_activate(key: String) -> String {
+    match crate::activation::activate(&key) {
+        Ok(()) => String::new(),
+        Err(e) => e,
+    }
+}
+
 pub fn main_check_mouse_time() {
     check_mouse_time();
 }

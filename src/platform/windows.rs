@@ -1053,6 +1053,26 @@ pub fn set_share_rdp(enable: bool) {
     run_cmds(cmd, false, "share_rdp").ok();
 }
 
+// Store the (encrypted) app-activation blob under the install key. When already
+// elevated / running as SYSTEM (the service), write directly with no prompt;
+// otherwise trigger a one-time UAC elevation to `reg add` it.
+pub fn set_license_data(value: &str) -> ResultType<()> {
+    let (subkey, _, _, _) = get_install_info();
+    let elevated = is_root() || is_elevated(None).unwrap_or(false);
+    if elevated {
+        let path = subkey.replace("HKEY_LOCAL_MACHINE\\", "");
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let (key, _) = hklm.create_subkey_with_flags(&path, KEY_READ | KEY_WRITE)?;
+        key.set_value("LicenseData", &value.to_string())?;
+        return Ok(());
+    }
+    let cmd = format!(
+        "reg add {} /f /v LicenseData /t REG_SZ /d \"{}\"",
+        subkey, value
+    );
+    run_cmds(cmd, false, "LicenseData")
+}
+
 pub fn get_current_process_session_id() -> Option<u32> {
     get_session_id_of_process(unsafe { GetCurrentProcessId() })
 }
