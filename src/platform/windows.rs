@@ -1053,22 +1053,36 @@ pub fn set_share_rdp(enable: bool) {
     run_cmds(cmd, false, "share_rdp").ok();
 }
 
-// Store the (encrypted) app-activation blob under the install key. When already
-// elevated / running as SYSTEM (the service), write directly with no prompt;
-// otherwise trigger a one-time UAC elevation to `reg add` it.
+// Fixed, install-independent location for the app-activation blob. Using the
+// install/Uninstall subkey would move the value between the portable and
+// installed states (different subkeys), so activation must live at a stable path.
+const LICENSE_REG_PATH: &str = "SOFTWARE\\RemoteGuard";
+
+// Read the (encrypted) app-activation blob. Works unelevated (HKLM read).
+pub fn get_license_data() -> String {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    if let Ok(tmp) = hklm.open_subkey(LICENSE_REG_PATH) {
+        if let Ok(v) = tmp.get_value("LicenseData") {
+            return v;
+        }
+    }
+    "".to_owned()
+}
+
+// Store the (encrypted) app-activation blob. When already elevated / running as
+// SYSTEM (the service), write directly with no prompt; otherwise trigger a
+// one-time UAC elevation to `reg add` it.
 pub fn set_license_data(value: &str) -> ResultType<()> {
-    let (subkey, _, _, _) = get_install_info();
     let elevated = is_root() || is_elevated(None).unwrap_or(false);
     if elevated {
-        let path = subkey.replace("HKEY_LOCAL_MACHINE\\", "");
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let (key, _) = hklm.create_subkey_with_flags(&path, KEY_READ | KEY_WRITE)?;
+        let (key, _) = hklm.create_subkey_with_flags(LICENSE_REG_PATH, KEY_READ | KEY_WRITE)?;
         key.set_value("LicenseData", &value.to_string())?;
         return Ok(());
     }
     let cmd = format!(
-        "reg add {} /f /v LicenseData /t REG_SZ /d \"{}\"",
-        subkey, value
+        "reg add HKEY_LOCAL_MACHINE\\{} /f /v LicenseData /t REG_SZ /d \"{}\"",
+        LICENSE_REG_PATH, value
     );
     run_cmds(cmd, false, "LicenseData")
 }
@@ -1079,10 +1093,8 @@ pub fn set_license_data_silent(value: &str) -> ResultType<()> {
     if !(is_root() || is_elevated(None).unwrap_or(false)) {
         bail!("not elevated; skipping silent license write");
     }
-    let (subkey, _, _, _) = get_install_info();
-    let path = subkey.replace("HKEY_LOCAL_MACHINE\\", "");
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let (key, _) = hklm.create_subkey_with_flags(&path, KEY_READ | KEY_WRITE)?;
+    let (key, _) = hklm.create_subkey_with_flags(LICENSE_REG_PATH, KEY_READ | KEY_WRITE)?;
     key.set_value("LicenseData", &value.to_string())?;
     Ok(())
 }

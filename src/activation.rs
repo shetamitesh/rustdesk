@@ -24,8 +24,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const LICENSE_PUBLIC_KEY: &str = "eEfrnEwBlqexK1bBa6TRFpcyMDbVelJ4oIQOZwwSmEI=";
 const ACTIVATE_URL: &str = "https://rd.puregroup.info/api/license/activate";
 const VALIDATE_URL: &str = "https://rd.puregroup.info/api/license/validate";
-#[cfg(windows)]
-const REG_VALUE_NAME: &str = "LicenseData";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const FORMAT_V1: u8 = 1;
 
@@ -134,7 +132,7 @@ fn now_secs() -> i64 {
 
 #[cfg(windows)]
 fn read_stored() -> String {
-    crate::platform::windows::get_reg(REG_VALUE_NAME)
+    crate::platform::windows::get_license_data()
 }
 
 #[cfg(windows)]
