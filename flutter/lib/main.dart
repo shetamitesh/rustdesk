@@ -137,14 +137,16 @@ Future<void> initEnv(String appType) async {
 void runMainApp(bool startService) async {
   // register uni links
   await initEnv(kAppTypeMain);
-  // Activation gate (desktop): if this machine is not activated, show only the
-  // activation screen and do NOT start the service (it also refuses incoming).
-  final activated = !isDesktop || bind.mainIsActivated();
-  rxActivated.value = activated;
+  // Activation gate (desktop): if not activated, the UI shows only the activation
+  // screen (rxActivated) and connection.rs refuses incoming. The service still
+  // starts normally so the permanent password is generated as usual — an
+  // unactivated machine is locked by the UI gate + incoming refusal, not by
+  // withholding the service.
+  rxActivated.value = !isDesktop || bind.mainIsActivated();
   checkUpdate();
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
-  if (startService && activated) {
+  if (startService) {
     gFFI.serverModel.startService();
     bind.pluginSyncUi(syncTo: kAppTypeMain);
     bind.pluginListReload();

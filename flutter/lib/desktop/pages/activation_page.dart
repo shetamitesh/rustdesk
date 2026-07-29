@@ -105,10 +105,8 @@ class _ActivationBodyState extends State<_ActivationBody> {
     final err = await bind.mainActivate(key: key);
     if (!mounted) return;
     if (err.isEmpty) {
-      // Activated — start the service that was withheld and reveal the app.
-      try {
-        gFFI.serverModel.startService();
-      } catch (_) {}
+      // Activated — reveal the app. The service is already running (started at
+      // launch), so the permanent password is already generated.
       rxActivated.value = true;
     } else {
       setState(() {
