@@ -378,6 +378,11 @@ mod cpal_impl {
             f => bail!("unsupported audio format: {:?}", f),
         };
         stream.play()?;
+        log::info!(
+            "audio capture: loopback stream started (device_rate={}, encode_rate={})",
+            sample_rate_0,
+            sample_rate
+        );
         Ok((
             Box::new(stream),
             Arc::new(create_format_msg(sample_rate, ch as _)),
@@ -424,6 +429,23 @@ mod cpal_impl {
             &stream_config,
             move |data: &[T], _: &InputCallbackInfo| {
                 let buffer: Vec<f32> = data.iter().map(|s| T::to_sample(*s)).collect();
+                // Diagnostic: periodically log the raw capture peak so we can tell
+                // whether WASAPI loopback is grabbing real audio (peak > 0) or
+                // silence (peak ~ 0) even while sound is playing.
+                {
+                    static CB_COUNT: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let n = CB_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n % 200 == 0 {
+                        let peak = buffer.iter().fold(0f32, |m, x| m.max(x.abs()));
+                        log::info!(
+                            "audio capture diag: callback#{}, samples={}, peak={:.4}",
+                            n,
+                            buffer.len(),
+                            peak
+                        );
+                    }
+                }
                 let mut lock = INPUT_BUFFER.lock().unwrap();
                 lock.extend(buffer);
                 while lock.len() >= rechannel_len {
@@ -522,6 +544,9 @@ fn send_f32(data: &[f32], encoder: &mut Encoder, sp: &GenericService) {
             });
             sp.send(msg_out);
         }
-        Err(_) => {}
+        // Diagnostic: surface opus encode failures instead of silently dropping.
+        Err(e) => {
+            log::error!("audio opus encode failed (len={}): {}", data.len(), e);
+        }
     }
 }
