@@ -186,11 +186,18 @@ mod cpal_impl {
     #[derive(Default)]
     pub struct State {
         stream: Option<(Box<dyn StreamTrait>, Arc<Message>)>,
+        // A silent render stream kept active on the default output device so
+        // Windows 7 WASAPI loopback actually delivers audio (on Win7 loopback
+        // returns silence unless something is rendering to the endpoint).
+        #[cfg(windows)]
+        keepalive: Option<cpal::Stream>,
     }
 
     impl super::service::Reset for State {
         fn reset(&mut self) {
             self.stream.take();
+            #[cfg(windows)]
+            self.keepalive.take();
         }
     }
 
@@ -200,6 +207,8 @@ mod cpal_impl {
         match &state.stream {
             None => {
                 state.stream = Some(play(&sp)?);
+                #[cfg(windows)]
+                start_keepalive(state);
             }
             _ => {}
         }
@@ -215,6 +224,8 @@ mod cpal_impl {
             match &state.stream {
                 None => {
                     state.stream = Some(play(&sp)?);
+                    #[cfg(windows)]
+                    start_keepalive(state);
                 }
                 _ => {}
             }
@@ -257,6 +268,68 @@ mod cpal_impl {
             )
         }
         send_f32(&data, encoder, sp);
+    }
+
+    // Windows 7 WASAPI loopback returns silence unless a render stream is active
+    // on the endpoint. We start a silent output stream on the default output
+    // device to keep it "primed" so loopback capture actually delivers audio.
+    // Harmless on Win10/11 (just renders silence). Non-fatal on failure.
+    #[cfg(windows)]
+    fn start_keepalive(state: &mut State) {
+        if state.keepalive.is_some() {
+            return;
+        }
+        match build_keepalive() {
+            Ok(s) => {
+                log::info!("audio keepalive render stream started (Windows loopback prime)");
+                state.keepalive = Some(s);
+            }
+            Err(e) => {
+                log::error!("audio keepalive render stream failed to start: {}", e);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn build_keepalive() -> ResultType<cpal::Stream> {
+        let device = HOST
+            .default_output_device()
+            .with_context(|| "keepalive: no default output device")?;
+        let config = device
+            .default_output_config()
+            .map_err(|e| anyhow!(e))
+            .with_context(|| "keepalive: no default output config")?;
+        let sc: StreamConfig = config.clone().into();
+        use cpal::SampleFormat::*;
+        match config.sample_format() {
+            I8 => build_keepalive_output::<i8>(&device, &sc),
+            I16 => build_keepalive_output::<i16>(&device, &sc),
+            I32 => build_keepalive_output::<i32>(&device, &sc),
+            U8 => build_keepalive_output::<u8>(&device, &sc),
+            U16 => build_keepalive_output::<u16>(&device, &sc),
+            F32 => build_keepalive_output::<f32>(&device, &sc),
+            F64 => build_keepalive_output::<f64>(&device, &sc),
+            f => bail!("keepalive: unsupported output format {:?}", f),
+        }
+    }
+
+    #[cfg(windows)]
+    fn build_keepalive_output<T>(device: &Device, config: &StreamConfig) -> ResultType<cpal::Stream>
+    where
+        T: cpal::SizedSample + 'static,
+    {
+        let stream = device.build_output_stream(
+            config,
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                for s in data.iter_mut() {
+                    *s = T::EQUILIBRIUM;
+                }
+            },
+            move |err| log::trace!("keepalive stream error: {}", err),
+            None,
+        )?;
+        stream.play()?;
+        Ok(stream)
     }
 
     #[cfg(feature = "screencapturekit")]
